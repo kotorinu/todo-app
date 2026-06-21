@@ -1,0 +1,70 @@
+name: daily-videos
+
+# 毎日の動画生成ルーティン(雛形)
+# - 手動実行(workflow_dispatch)でまず動作確認 → 慣れたら schedule のコメントを外す
+# - 台本→字幕→静止プレビューは確実に生成。MP4(Remotion)はベストエフォート
+# - 完成物は「Artifacts」からダウンロードして、確認のうえTikTokへ手動/予約投稿
+#
+# 有効化の手順:
+#   1) リポジトリ Settings → Secrets → Actions に ANTHROPIC_API_KEY を追加(未設定なら自動でmock台本)
+#   2) content/car-photos/<id>/ に実車写真をコミット
+#   3) 下の schedule のコメントを外す(cronはUTC。例は日本時間7:00=UTC22:00)
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "0 22 * * *"   # 毎日 07:00 JST
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 日本語フォントを入れる(字幕の文字化け防止)
+        run: sudo apt-get update && sudo apt-get install -y fonts-ipafont-gothic
+
+      - name: 依存インストール
+        run: npm ci
+
+      - name: 台本を生成(鍵が無ければ自動でmock)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          MOCK=""
+          if [ -z "$ANTHROPIC_API_KEY" ]; then MOCK="--mock"; fi
+          npm run gen:scripts -- $MOCK
+
+      - name: 字幕とプレビュー、可能ならMP4を生成
+        env:
+          LINE_URL: ${{ secrets.LINE_URL }}
+          SHOP_NAME: ${{ secrets.SHOP_NAME }}
+          SHOP_AREA: ${{ secrets.SHOP_AREA }}
+        run: |
+          for f in content/scripts/*.json; do
+            id=$(basename "$f" .json)
+            echo "::group::$id"
+            npm run gen:tts -- --video "$id" || true
+            npm run preview -- --video "$id" || true
+            # MP4はChromeが要るためベストエフォート(失敗してもプレビューは残る)
+            npm run render -- --video "$id" || echo "render skipped/failed for $id"
+            echo "::endgroup::"
+          done
+
+      - name: 生成物をアップロード(Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: videos-${{ github.run_id }}
+          path: |
+            content/scripts/*.json
+            content/captions/*.srt
+            content/renders/*.png
+            content/renders/*.mp4
+          if-no-files-found: warn
+          retention-days: 14
